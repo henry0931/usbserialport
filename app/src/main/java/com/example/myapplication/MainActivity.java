@@ -11,17 +11,23 @@ import android.os.Environment;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
+import com.hoho.android.usbserial.util.SerialInputOutputManager;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;
-import android_serialport_api.UsbSerialDevice;
-import android_serialport_api.UsbSerialInterface;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
     UsbManager usbManager;
-    UsbDevice device;
-    UsbSerialDevice serialPort;
+    UsbSerialPort serialPort;
+    ExecutorService executorService;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -29,34 +35,48 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-        // 設備初始化代碼...
+        executorService = Executors.newSingleThreadExecutor();
 
-        // 讀取數據
-        if (device != null) {
-            UsbDeviceConnection connection = usbManager.openDevice(device);
-            serialPort = UsbSerialDevice.createUsbSerialDevice(device, connection);
+        // Detect available USB devices
+        List<UsbSerialDriver> availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager);
+        if (!availableDrivers.isEmpty()) {
+            // Get the first available driver
+            UsbSerialDriver driver = availableDrivers.get(0);
+            UsbDeviceConnection connection = usbManager.openDevice(driver.getDevice());
+            if (connection != null) {
+                // Open a port on the driver
+                serialPort = driver.getPorts().get(0);
+                try {
+                    serialPort.open(connection);
+                    serialPort.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
-            if (serialPort != null) {
-                if (serialPort.open()) {
-                    // 設置串口參數
-                    serialPort.setBaudRate(115200);
-                    serialPort.setDataBits(UsbSerialInterface.DATA_BITS_8);
-                    serialPort.setStopBits(UsbSerialInterface.STOP_BITS_1);
-                    serialPort.setParity(UsbSerialInterface.PARITY_NONE);
-
-                    // 註冊讀取數據的回調
-                    serialPort.read(mCallback);
+                    // Start reading data
+                    startIoManager();
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
             }
         }
     }
 
-    // 設置接收數據的回調
-    private final UsbSerialInterface.UsbReadCallback mCallback = new UsbSerialInterface.UsbReadCallback() {
+    private void startIoManager() {
+        SerialInputOutputManager ioManager = new SerialInputOutputManager(serialPort, mListener);
+        executorService.submit(ioManager);
+    }
+
+    // Data read listener
+    private final SerialInputOutputManager.Listener mListener = new SerialInputOutputManager.Listener() {
         @Override
-        public void onReceivedData(byte[] data) {
-            String receivedData = new String(data);
-            saveToTextFile(receivedData);
+        public void onNewData(byte[] data) {
+            runOnUiThread(() -> {
+                String receivedData = new String(data);
+                saveToTextFile(receivedData);
+            });
+        }
+
+        @Override
+        public void onRunError(Exception e) {
+            e.printStackTrace();
         }
     };
 
@@ -78,6 +98,19 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (serialPort != null) {
+            try {
+                serialPort.close();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+        executorService.shutdown();
     }
 }
 
